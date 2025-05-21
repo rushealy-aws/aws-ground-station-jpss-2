@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Lambda function for processing JPSS-2 satellite data'
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Name of the S3 bucket containing satellite data
+    Default: jpss2-satellite-data
+  
+  ProcessedBucketName:
+    Type: String
+    Description: Name of the S3 bucket to store processed data
+    Default: jpss2-processed-data
+
+Resources:
+  ProcessedDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ProcessedBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${BucketName}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${ProcessedBucketName}/*'
+
+  DataProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: jpss2-data-processor
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          OUTPUT_BUCKET: !Ref ProcessedBucketName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import logging
+          from datetime import datetime
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          s3_client = boto3.client('s3')
+          output_bucket = os.environ['OUTPUT_BUCKET']
+
+          def handler(event, context):
+              logger.info('Received event: ' + json.dumps(event))
+              
+              # Get the object from the event
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              key = event['Records'][0]['s3']['object']['key']
+              
+              logger.info(f"Processing data from {bucket}/{key}")
+              
+              try:
+                  # Download the satellite data file
+                  download_path = f"/tmp/{os.path.basename(key)}"
+                  s3_client.download_file(bucket, key, download_path)
+                  
+                  # Process the file (this is a placeholder for actual processing)
+                  processed_data = process_satellite_data(download_path)
+                  
+                  # Upload processed results
+                  timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                  processed_key = f"processed/{os.path.dirname(key)}/processed-{timestamp}.json"
+                  
+                  with open(f"/tmp/processed-{timestamp}.json", 'w') as f:
+                      json.dump(processed_data, f)
+                  
+                  s3_client.upload_file(
+                      f"/tmp/processed-{timestamp}.json", 
+                      output_bucket, 
+                      processed_key
+                  )
+                  
+                  logger.info(f"Processing complete. Results saved to {output_bucket}/{processed_key}")
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Processing completed successfully')
+                  }
+              
+              except Exception as e:
+                  logger.error(f"Error processing {key}: {str(e)}")
+                  raise e
+
+          def process_satellite_data(file_path):
+              """
+              Placeholder function for satellite data processing.
+              In a real implementation, this would contain the actual data processing logic.
+              """
+              # This is where you would implement your specific processing logic
+              # For example: parsing binary data, extracting measurements, etc.
+              
+              # For demonstration, we'll just return some metadata
+              return {
+                  "processed_at": datetime.now().isoformat(),
+                  "source_file": os.path.basename(file_path),
+                  "data_summary": {
+                      "status": "processed",
+                      "measurements": {
+                          "temperature": {
+                              "min": -45.2,
+                              "max": 28.7,
+                              "avg": -12.4
+                          },
+                          "humidity": {
+                              "min": 0.12,
+                              "max": 0.98,
+                              "avg": 0.67
+                          }
+                      }
+                  }
+              }
+
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DataProcessingFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:aws:s3:::${BucketName}'
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function for processing satellite data
+    Value: !GetAtt DataProcessingFunction.Arn
+
+  ProcessedDataBucketName:
+    Description: Name of the S3 bucket for processed satellite data
+    Value: !Ref ProcessedDataBucket

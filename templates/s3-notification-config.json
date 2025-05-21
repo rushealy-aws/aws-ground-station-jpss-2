@@ -1,0 +1,34 @@
+{
+  "TopicConfigurations": [
+    {
+      "TopicArn": "arn:aws:sns:us-west-2:ACCOUNT_ID:jpss2-data-notifications",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [
+            {
+              "Name": "prefix",
+              "Value": "jpss2-data/"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "LambdaFunctionConfigurations": [
+    {
+      "LambdaFunctionArn": "arn:aws:lambda:us-west-2:ACCOUNT_ID:function:jpss2-data-processor",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [
+            {
+              "Name": "prefix",
+              "Value": "jpss2-data/"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

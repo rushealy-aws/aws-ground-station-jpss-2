@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Ground Station Mission Profile for JPSS-2 Satellite'
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Name of the S3 bucket to store satellite data
+    Default: jpss2-satellite-data
+
+  DataflowEndpointGroupName:
+    Type: String
+    Description: Name of the dataflow endpoint group
+    Default: jpss2-dataflow-endpoint-group
+
+  MissionProfileName:
+    Type: String
+    Description: Name of the mission profile
+    Default: jpss2-mission-profile
+
+  ContactProfileName:
+    Type: String
+    Description: Name of the contact profile
+    Default: jpss2-contact-profile
+
+  TrackingConfigName:
+    Type: String
+    Description: Name of the tracking configuration
+    Default: jpss2-tracking-config
+
+Resources:
+  SatelliteDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  GroundStationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: groundstation.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /service-role/
+
+  DataflowEndpointGroup:
+    Type: AWS::GroundStation::DataflowEndpointGroup
+    Properties:
+      Name: !Ref DataflowEndpointGroupName
+      EndpointDetails:
+        - SecurityDetails:
+            RoleArn: !GetAtt GroundStationRole.Arn
+          Endpoint:
+            Name: S3-Downlink
+            Address:
+              Name: !Ref BucketName
+              Port: 443
+            Mtu: 1500
+            Status: healthy
+
+  TrackingConfig:
+    Type: AWS::GroundStation::Config
+    Properties:
+      Name: !Ref TrackingConfigName
+      ConfigData:
+        TrackingConfig:
+          Autotrack: PREFERRED
+
+  AntennaDownlinkConfig:
+    Type: AWS::GroundStation::Config
+    Properties:
+      Name: jpss2-antenna-downlink-config
+      ConfigData:
+        AntennaDownlinkConfig:
+          SpectrumConfig:
+            Bandwidth:
+              Units: MHz
+              Value: 40
+            CenterFrequency:
+              Units: MHz
+              Value: 7812.0
+            Polarization: RIGHT_HAND
+
+  S3RecordingConfig:
+    Type: AWS::GroundStation::Config
+    Properties:
+      Name: jpss2-s3-recording-config
+      ConfigData:
+        S3RecordingConfig:
+          BucketArn: !GetAtt SatelliteDataBucket.Arn
+          RoleArn: !GetAtt GroundStationRole.Arn
+          Prefix: jpss2-data/
+
+  ContactProfile:
+    Type: AWS::GroundStation::MissionProfile
+    DependsOn:
+      - TrackingConfig
+      - AntennaDownlinkConfig
+      - S3RecordingConfig
+    Properties:
+      Name: !Ref ContactProfileName
+      ContactPrePassDurationSeconds: 120
+      ContactPostPassDurationSeconds: 120
+      MinimumViableContactDurationSeconds: 180
+      TrackingConfigArn: !Ref TrackingConfig
+      DataflowEdges:
+        - Source: !Ref AntennaDownlinkConfig
+          Destination: !Ref S3RecordingConfig
+
+  MissionProfile:
+    Type: AWS::GroundStation::MissionProfile
+    DependsOn: ContactProfile
+    Properties:
+      Name: !Ref MissionProfileName
+      ContactPostPassDurationSeconds: 120
+      ContactPrePassDurationSeconds: 120
+      MinimumViableContactDurationSeconds: 180
+      TrackingConfigArn: !Ref TrackingConfig
+      DataflowEdges:
+        - Source: !Ref AntennaDownlinkConfig
+          Destination: !Ref S3RecordingConfig
+      StreamsKmsRole: !GetAtt GroundStationRole.Arn
+      StreamsKmsKey: ''
+
+Outputs:
+  MissionProfileArn:
+    Description: ARN of the created mission profile
+    Value: !Ref MissionProfile
+
+  DataflowEndpointGroupArn:
+    Description: ARN of the created dataflow endpoint group
+    Value: !Ref DataflowEndpointGroup
+
+  S3BucketName:
+    Description: Name of the S3 bucket for satellite data
+    Value: !Ref SatelliteDataBucket
+
+  S3BucketArn:
+    Description: ARN of the S3 bucket for satellite data
+    Value: !GetAtt SatelliteDataBucket.Arn

@@ -1,0 +1,27 @@
+{
+  "Rules": [
+    {
+      "ID": "Move to Glacier after 30 days",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "jpss2-data/"
+      },
+      "Transitions": [
+        {
+          "Days": 30,
+          "StorageClass": "GLACIER"
+        }
+      ]
+    },
+    {
+      "ID": "Delete after 365 days",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "jpss2-data/"
+      },
+      "Expiration": {
+        "Days": 365
+      }
+    }
+  ]
+}
