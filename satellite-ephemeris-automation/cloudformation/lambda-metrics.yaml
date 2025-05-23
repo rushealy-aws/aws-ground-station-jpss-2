@@ -1,0 +1,157 @@
+  # Lambda function with CloudWatch metrics
+  EphemerisUpdateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EphemerisUpdateFunction
+      Handler: index.handler
+      Role: !GetAtt EphemerisLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Environment:
+        Variables:
+          DEFAULT_SATELLITE_ID: !Ref SatelliteId
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import re
+          import json
+          import logging
+          from datetime import datetime
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize clients
+          s3 = boto3.client('s3')
+          groundstation = boto3.client('groundstation')
+          cloudwatch = boto3.client('cloudwatch')
+
+          # Get environment variables
+          DEFAULT_SATELLITE_ID = os.environ.get('DEFAULT_SATELLITE_ID')
+
+          def put_metric(name, value, unit='Count'):
+              """Put a metric to CloudWatch"""
+              try:
+                  cloudwatch.put_metric_data(
+                      Namespace='CustomMetrics/Ephemeris',
+                      MetricData=[
+                          {
+                              'MetricName': name,
+                              'Value': value,
+                              'Unit': unit,
+                              'Dimensions': [
+                                  {
+                                      'Name': 'FunctionName',
+                                      'Value': os.environ['AWS_LAMBDA_FUNCTION_NAME']
+                                  }
+                              ]
+                          }
+                      ]
+                  )
+              except Exception as e:
+                  logger.error(f"Error putting metric {name}: {str(e)}")
+
+          def handler(event, context):
+              """Process S3 events for new ephemeris files"""
+              try:
+                  # Get bucket and key from event
+                  bucket = event['Records'][0]['s3']['bucket']['name']
+                  key = event['Records'][0]['s3']['object']['key']
+                  
+                  logger.info(f"Processing new ephemeris file: {key} from bucket: {bucket}")
+                  
+                  # Extract metadata from filename
+                  satellite_id, priority = extract_metadata_from_filename(key)
+                  
+                  # Download the OEM file
+                  local_file = '/tmp/ephemeris.oem'
+                  s3.download_file(bucket, key, local_file)
+                  
+                  # Validate OEM format
+                  validate_oem_format(local_file)
+                  
+                  # Read file content
+                  with open(local_file, 'r') as file:
+                      ephemeris_data = file.read()
+                  
+                  # Update ephemeris in Ground Station
+                  response = groundstation.put_ephemeris(
+                      satelliteId=satellite_id,
+                      ephemeris=ephemeris_data,
+                      priority=priority
+                  )
+                  
+                  ephemeris_id = response['ephemerisId']
+                  logger.info(f"Successfully updated ephemeris for satellite {satellite_id}. Ephemeris ID: {ephemeris_id}")
+                  
+                  # Record successful update metric
+                  put_metric('SuccessfulUpdates', 1)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Ephemeris updated successfully',
+                          'ephemerisId': ephemeris_id,
+                          'satelliteId': satellite_id
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error processing ephemeris file: {str(e)}")
+                  # Record failed update metric
+                  put_metric('FailedUpdates', 1)
+                  raise e
+
+          def extract_metadata_from_filename(filename):
+              """Extract satellite ID and priority from filename"""
+              # Expected format: satellite-id_YYYY-MM-DD_priority.oem
+              try:
+                  # Remove path if present
+                  filename = os.path.basename(filename)
+                  
+                  # Parse filename
+                  pattern = r'^([^_]+)_\d{4}-\d{2}-\d{2}_(\d+)\.oem$'
+                  match = re.match(pattern, filename)
+                  
+                  if match:
+                      satellite_id = match.group(1)
+                      priority = int(match.group(2))
+                  else:
+                      # Use default satellite ID and priority if filename doesn't match pattern
+                      logger.warning(f"Filename {filename} doesn't match expected pattern. Using defaults.")
+                      satellite_id = DEFAULT_SATELLITE_ID
+                      priority = 1
+                  
+                  return satellite_id, priority
+                  
+              except Exception as e:
+                  logger.error(f"Error extracting metadata from filename: {str(e)}")
+                  # Fall back to defaults
+                  return DEFAULT_SATELLITE_ID, 1
+
+          def validate_oem_format(file_path):
+              """Basic validation of OEM file format"""
+              required_headers = ['CCSDS_OEM_VERS', 'CREATION_DATE', 'ORIGINATOR']
+              required_sections = ['META_START', 'META_STOP', 'DATA_START', 'DATA_STOP']
+              
+              with open(file_path, 'r') as file:
+                  content = file.read()
+                  
+              # Check for required headers and sections
+              for header in required_headers:
+                  if header not in content:
+                      raise ValueError(f"Invalid OEM format: Missing required header {header}")
+                      
+              for section in required_sections:
+                  if section not in content:
+                      raise ValueError(f"Invalid OEM format: Missing required section {section}")
+              
+              # Check for data lines between DATA_START and DATA_STOP
+              data_section = content.split('DATA_START')[1].split('DATA_STOP')[0].strip()
+              if not data_section or len(data_section.split('\n')) < 1:
+                  raise ValueError("Invalid OEM format: No data points found")
+                  
+              logger.info("OEM file validation passed")
+              return True

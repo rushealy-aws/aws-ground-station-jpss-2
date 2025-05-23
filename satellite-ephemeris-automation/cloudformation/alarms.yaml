@@ -1,0 +1,63 @@
+  # CloudWatch Alarm for failed ephemeris updates (Lambda errors)
+  FailedEphemerisAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-FailedEphemerisUpdates
+      AlarmDescription: Alarm for failed ephemeris updates
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EphemerisUpdateFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref EphemerisNotificationTopic
+      OKActions:
+        - !Ref EphemerisNotificationTopic
+
+  # CloudWatch Alarm for successful ephemeris updates
+  SuccessfulEphemerisAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-SuccessfulEphemerisUpdates
+      AlarmDescription: Alarm for successful ephemeris updates
+      MetricName: SuccessfulUpdates
+      Namespace: CustomMetrics/Ephemeris
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EphemerisUpdateFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref EphemerisNotificationTopic
+      OKActions:
+        - !Ref EphemerisNotificationTopic
+
+  # CloudWatch Alarm for failed updates (custom metric)
+  FailedUpdatesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-FailedUpdates
+      AlarmDescription: Alarm for failed ephemeris updates (custom metric)
+      MetricName: FailedUpdates
+      Namespace: CustomMetrics/Ephemeris
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EphemerisUpdateFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref EphemerisNotificationTopic

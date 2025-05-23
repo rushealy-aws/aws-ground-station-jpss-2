@@ -1,0 +1,26 @@
+  # SNS Topic for notifications
+  EphemerisNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-notifications
+      DisplayName: "Ephemeris Update Notifications"
+
+  # SNS Topic Policy
+  EphemerisNotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref EphemerisNotificationTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref EphemerisNotificationTopic
+
+Outputs:
+  NotificationTopicArn:
+    Description: ARN of the SNS notification topic
+    Value: !Ref EphemerisNotificationTopic

@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Automated satellite ephemeris updates using S3 and Lambda'
+
+Parameters:
+  SatelliteId:
+    Type: String
+    Description: The ID of the satellite in AWS Ground Station
+  
+  BucketName:
+    Type: String
+    Description: Name for the S3 bucket to store ephemeris files
+    
+  EphemerisFilePrefix:
+    Type: String
+    Description: Prefix for ephemeris files in S3 bucket
+    Default: ephemeris/
+    
+Resources:
+  # S3 Bucket for ephemeris files
+  EphemerisBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .oem
+            Function: !GetAtt EphemerisUpdateFunction.Arn
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldEphemeris
+            Status: Enabled
+            ExpirationInDays: 365
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  
+  # Lambda execution role
+  EphemerisLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EphemerisUpdatePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${BucketName}/*'
+              - Effect: Allow
+                Action:
+                  - groundstation:PutEphemeris
+                  - groundstation:GetEphemeris
+                  - groundstation:ListEphemerides
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+  
+  # Lambda function for processing ephemeris files
+  EphemerisUpdateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EphemerisUpdateFunction
+      Handler: index.handler
+      Role: !GetAtt EphemerisLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Environment:
+        Variables:
+          DEFAULT_SATELLITE_ID: !Ref SatelliteId
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import re
+          import json
+          import logging
+          from datetime import datetime
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize clients
+          s3 = boto3.client('s3')
+          groundstation = boto3.client('groundstation')
+          cloudwatch = boto3.client('cloudwatch')
+
+          # Get environment variables
+          DEFAULT_SATELLITE_ID = os.environ.get('DEFAULT_SATELLITE_ID')
+
+          def put_metric(name, value, unit='Count'):
+              """Put a metric to CloudWatch"""
+              try:
+                  cloudwatch.put_metric_data(
+                      Namespace='CustomMetrics/Ephemeris',
+                      MetricData=[
+                          {
+                              'MetricName': name,
+                              'Value': value,
+                              'Unit': unit,
+                              'Dimensions': [
+                                  {
+                                      'Name': 'FunctionName',
+                                      'Value': os.environ['AWS_LAMBDA_FUNCTION_NAME']
+                                  }
+                              ]
+                          }
+                      ]
+                  )
+              except Exception as e:
+                  logger.error(f"Error putting metric {name}: {str(e)}")
+
+          def handler(event, context):
+              """Process S3 events for new ephemeris files"""
+              try:
+                  # Get bucket and key from event
+                  bucket = event['Records'][0]['s3']['bucket']['name']
+                  key = event['Records'][0]['s3']['object']['key']
+                  
+                  logger.info(f"Processing new ephemeris file: {key} from bucket: {bucket}")
+                  
+                  # Extract metadata from filename
+                  satellite_id, priority = extract_metadata_from_filename(key)
+                  
+                  # Download the OEM file
+                  local_file = '/tmp/ephemeris.oem'
+                  s3.download_file(bucket, key, local_file)
+                  
+                  # Validate OEM format
+                  validate_oem_format(local_file)
+                  
+                  # Read file content
+                  with open(local_file, 'r') as file:
+                      ephemeris_data = file.read()
+                  
+                  # Update ephemeris in Ground Station
+                  response = groundstation.put_ephemeris(
+                      satelliteId=satellite_id,
+                      ephemeris=ephemeris_data,
+                      priority=priority
+                  )
+                  
+                  ephemeris_id = response['ephemerisId']
+                  logger.info(f"Successfully updated ephemeris for satellite {satellite_id}. Ephemeris ID: {ephemeris_id}")
+                  
+                  # Record successful update metric
+                  put_metric('SuccessfulUpdates', 1)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Ephemeris updated successfully',
+                          'ephemerisId': ephemeris_id,
+                          'satelliteId': satellite_id
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error processing ephemeris file: {str(e)}")
+                  # Record failed update metric
+                  put_metric('FailedUpdates', 1)
+                  raise e
+
+          def extract_metadata_from_filename(filename):
+              """Extract satellite ID and priority from filename"""
+              # Expected format: satellite-id_YYYY-MM-DD_priority.oem
+              try:
+                  # Remove path if present
+                  filename = os.path.basename(filename)
+                  
+                  # Parse filename
+                  pattern = r'^([^_]+)_\d{4}-\d{2}-\d{2}_(\d+)\.oem$'
+                  match = re.match(pattern, filename)
+                  
+                  if match:
+                      satellite_id = match.group(1)
+                      priority = int(match.group(2))
+                  else:
+                      # Use default satellite ID and priority if filename doesn't match pattern
+                      logger.warning(f"Filename {filename} doesn't match expected pattern. Using defaults.")
+                      satellite_id = DEFAULT_SATELLITE_ID
+                      priority = 1
+                  
+                  return satellite_id, priority
+                  
+              except Exception as e:
+                  logger.error(f"Error extracting metadata from filename: {str(e)}")
+                  # Fall back to defaults
+                  return DEFAULT_SATELLITE_ID, 1
+
+          def validate_oem_format(file_path):
+              """Basic validation of OEM file format"""
+              required_headers = ['CCSDS_OEM_VERS', 'CREATION_DATE', 'ORIGINATOR']
+              required_sections = ['META_START', 'META_STOP', 'DATA_START', 'DATA_STOP']
+              
+              with open(file_path, 'r') as file:
+                  content = file.read()
+                  
+              # Check for required headers and sections
+              for header in required_headers:
+                  if header not in content:
+                      raise ValueError(f"Invalid OEM format: Missing required header {header}")
+                      
+              for section in required_sections:
+                  if section not in content:
+                      raise ValueError(f"Invalid OEM format: Missing required section {section}")
+              
+              # Check for data lines between DATA_START and DATA_STOP
+              data_section = content.split('DATA_START')[1].split('DATA_STOP')[0].strip()
+              if not data_section or len(data_section.split('\n')) < 1:
+                  raise ValueError("Invalid OEM format: No data points found")
+                  
+              logger.info("OEM file validation passed")
+              return True
+  
+  # Permission for S3 to invoke Lambda
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref EphemerisUpdateFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt EphemerisBucket.Arn
+  
+  # SNS Topic for notifications
+  EphemerisNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-notifications
+      DisplayName: "Ephemeris Update Notifications"
+
+  # SNS Topic Policy
+  EphemerisNotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref EphemerisNotificationTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref EphemerisNotificationTopic
+
+  # CloudWatch Alarm for failed ephemeris updates
+  FailedEphemerisAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-FailedEphemerisUpdates
+      AlarmDescription: Alarm for failed ephemeris updates
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EphemerisUpdateFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref EphemerisNotificationTopic
+      OKActions:
+        - !Ref EphemerisNotificationTopic
+
+  # CloudWatch Alarm for successful ephemeris updates
+  SuccessfulEphemerisAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-SuccessfulEphemerisUpdates
+      AlarmDescription: Alarm for successful ephemeris updates
+      MetricName: SuccessfulUpdates
+      Namespace: CustomMetrics/Ephemeris
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EphemerisUpdateFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref EphemerisNotificationTopic
+      OKActions:
+        - !Ref EphemerisNotificationTopic
+
+Outputs:
+  EphemerisBucketName:
+    Description: Name of the S3 bucket for ephemeris files
+    Value: !Ref EphemerisBucket
+    
+  EphemerisLambdaFunction:
+    Description: Lambda function for processing ephemeris files
+    Value: !Ref EphemerisUpdateFunction
+    
+  EphemerisLambdaArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt EphemerisUpdateFunction.Arn
