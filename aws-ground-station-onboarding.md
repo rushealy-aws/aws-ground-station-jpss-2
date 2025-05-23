@@ -89,26 +89,79 @@ Before starting the onboarding process, ensure you have:
    - Supported formats:
      ```
      - TLE (Two-Line Element)
-     - CPF (Consolidated Prediction Format)
-     - OPM (Orbit Parameter Message)
+     - OEM (Orbit Ephemeris Message)
      ```
 
-2. **Upload Ephemeris**
+2. **TLE Format Requirements**
+   - Standard NORAD Two-Line Element format
+   - Must include satellite name as a comment line before TLE
+   - Example:
+     ```
+     ISS (ZARYA)
+     1 25544U 98067A   21086.42859347  .00000218  00000-0  11606-4 0  9995
+     2 25544  51.6455 354.9481 0002060  95.9590 352.4671 15.48919755277419
+     ```
+   - TLEs are valid for approximately 2 weeks
+
+3. **OEM Format Requirements**
+   - Must conform to CCSDS standard
+   - Includes state vectors (position and velocity)
+   - Supports higher precision than TLE
+   - Example structure:
+     ```
+     CCSDS_OEM_VERS = 2.0
+     CREATION_DATE = 2021-03-25T01:58:48
+     ORIGINATOR = ORGANIZATION
+     META_START
+     OBJECT_NAME = SATELLITE-A
+     OBJECT_ID = 2021-123A
+     CENTER_NAME = EARTH
+     REF_FRAME = EME2000
+     TIME_SYSTEM = UTC
+     META_STOP
+     DATA_START
+     YYYY-MM-DDThh:mm:ss.sss X Y Z X_DOT Y_DOT Z_DOT
+     ...
+     DATA_STOP
+     ```
+
+4. **Upload Ephemeris**
    ```bash
+   # For TLE
    aws groundstation put-ephemeris \
      --satellite-id your-satellite-id \
-     --ephemeris file://ephemeris.tle
+     --ephemeris file://ephemeris.tle \
+     --priority 1
+
+   # For OEM
+   aws groundstation put-ephemeris \
+     --satellite-id your-satellite-id \
+     --ephemeris file://ephemeris.oem \
+     --priority 1
    ```
 
-3. **Ephemeris Update Process**
+5. **Ephemeris Priority**
+   - Lower number indicates higher priority (1 is highest)
+   - AWS Ground Station uses highest priority valid ephemeris
+   - Customer-provided ephemeris takes precedence over AWS-provided ephemeris
+
+6. **Ephemeris Update Process**
    - Implement automated ephemeris updates
    - Set up monitoring for ephemeris accuracy
-   - Configure update frequency
+   - Configure update frequency based on ephemeris type:
+     - TLE: Update every 1-2 weeks
+     - OEM: Update based on mission requirements
 
-4. **Validation Process**
+7. **Validation Process**
    ```bash
-   aws groundstation get-ephemeris \
+   # List all ephemerides for a satellite
+   aws groundstation list-ephemerides \
      --satellite-id your-satellite-id
+
+   # Get specific ephemeris details
+   aws groundstation get-ephemeris \
+     --satellite-id your-satellite-id \
+     --ephemeris-id your-ephemeris-id
    ```
 
 ## Testing and Validation
@@ -189,9 +242,10 @@ Common issues and solutions:
    - Validate dataflow endpoints
 
 3. **Ephemeris Problems**
-   - Verify format compliance
-   - Check update frequency
+   - Verify TLE or OEM format compliance
+   - Check ephemeris validity period
    - Validate orbital parameters
+   - Confirm ephemeris priority settings
 
 ## Support and Resources
 
